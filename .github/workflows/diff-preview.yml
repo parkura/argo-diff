@@ -55,4 +55,4 @@ jobs:
           gh pr comment ${{ github.event.number }} --repo ${{ github.repository }} --body-file output/diff.md --edit-last || \
           gh pr comment ${{ github.event.number }} --repo ${{ github.repository }} --body-file output/diff.md
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.ARGOCD_GITHUB_TOKEN }}

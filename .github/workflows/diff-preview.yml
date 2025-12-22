@@ -1,0 +1,58 @@
+name: Diff Preview
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  diff-preview:
+    name: Diff Preview
+    runs-on: argocd-diff-runner  # Use your runner scale set name
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: target-branch
+          fetch-depth: 0
+
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          path: base-branch
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Install Argo CD CLI
+        run: |
+          curl -sSL -o argocd-linux-amd64 https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+          sudo install -m 555 argocd-linux-amd64 /usr/local/bin/argocd
+          rm argocd-linux-amd64
+          argocd version
+
+      - name: Install argocd-diff-preview
+        run: |
+          curl -LJO https://github.com/dag-andersen/argocd-diff-preview/releases/download/v0.1.17/argocd-diff-preview-Linux-x86_64.tar.gz
+          tar -xvf argocd-diff-preview-Linux-x86_64.tar.gz
+          sudo mv argocd-diff-preview /usr/local/bin
+          argocd-diff-preview --version
+
+      - name: Generate Diff
+        run: |
+          argocd-diff-preview \
+            --repo ${{ github.repository }} \
+            --base-branch main \
+            --target-branch refs/pull/${{ github.event.number }}/merge \
+            --argocd-namespace=argocd-diff-preview \
+            --create-cluster=false
+
+      - name: Comment preview
+        run: |
+          gh pr comment ${{ github.event.number }} --repo ${{ github.repository }} --body-file output/diff.md --edit-last || \
+          gh pr comment ${{ github.event.number }} --repo ${{ github.repository }} --body-file output/diff.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

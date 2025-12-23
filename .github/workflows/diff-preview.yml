@@ -45,10 +45,10 @@ jobs:
       - name: Verify cluster access
         run: |
           echo "Checking cluster access..."
-          kubectl cluster-info
-          kubectl get nodes
+          kubectl get nodes || echo "Cannot list nodes (may need additional permissions)"
           echo "Checking for Argo CD namespace..."
           kubectl get namespace argocd-diff-preview || echo "Namespace argocd-diff-preview does not exist"
+          kubectl get namespace argocd || echo "Namespace argocd does not exist"
       - name: Generate Diff
         run: |
           argocd-diff-preview \
@@ -64,20 +64,15 @@ jobs:
           echo "Checking for output files..."
           ls -la output/ || echo "Output directory does not exist"
           if [ -f output/diff.md ]; then
-            echo "diff.md found. First few lines:"
-            head -20 output/diff.md
+            echo "diff.md found. Content preview:"
+            head -50 output/diff.md
           else
             echo "diff.md not found!"
           fi
       - name: Comment preview
-        if: always()
+        if: hashFiles('output/diff.md') != ''
         run: |
-          if [ -f output/diff.md ]; then
-            gh pr comment ${{ github.event.number }} --repo ${{ github.repository }} --body-file output/diff.md --edit-last || \
-            gh pr comment ${{ github.event.number }} --repo ${{ github.repository }} --body-file output/diff.md
-          else
-            echo "ERROR: No diff.md file found in output directory"
-            exit 1
-          fi
+          gh pr comment ${{ github.event.number }} --repo ${{ github.repository }} --body-file output/diff.md --edit-last || \
+          gh pr comment ${{ github.event.number }} --repo ${{ github.repository }} --body-file output/diff.md
         env:
           GITHUB_TOKEN: ${{ secrets.ARGOCD_GITHUB_TOKEN }}

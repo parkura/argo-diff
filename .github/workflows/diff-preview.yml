@@ -42,17 +42,42 @@ jobs:
           tar -xvf argocd-diff-preview-Linux-x86_64.tar.gz
           sudo mv argocd-diff-preview /usr/local/bin
           argocd-diff-preview --version
+      - name: Verify cluster access
+        run: |
+          echo "Checking cluster access..."
+          kubectl cluster-info
+          kubectl get nodes
+          echo "Checking for Argo CD namespace..."
+          kubectl get namespace argocd-diff-preview || echo "Namespace argocd-diff-preview does not exist"
       - name: Generate Diff
         run: |
           argocd-diff-preview \
             --repo ${{ github.repository }} \
             --base-branch main \
             --target-branch refs/pull/${{ github.event.number }}/merge \
-            --argocd-namespace=argocd-diff-preview \
-            --create-cluster=false
-      - name: Comment preview
+            --argocd-namespace argocd-diff-preview \
+            --create-cluster=false \
+            --debug
+      - name: Check output
+        if: always()
         run: |
-          gh pr comment ${{ github.event.number }} --repo ${{ github.repository }} --body-file output/diff.md --edit-last || \
-          gh pr comment ${{ github.event.number }} --repo ${{ github.repository }} --body-file output/diff.md
+          echo "Checking for output files..."
+          ls -la output/ || echo "Output directory does not exist"
+          if [ -f output/diff.md ]; then
+            echo "diff.md found. First few lines:"
+            head -20 output/diff.md
+          else
+            echo "diff.md not found!"
+          fi
+      - name: Comment preview
+        if: always()
+        run: |
+          if [ -f output/diff.md ]; then
+            gh pr comment ${{ github.event.number }} --repo ${{ github.repository }} --body-file output/diff.md --edit-last || \
+            gh pr comment ${{ github.event.number }} --repo ${{ github.repository }} --body-file output/diff.md
+          else
+            echo "ERROR: No diff.md file found in output directory"
+            exit 1
+          fi
         env:
           GITHUB_TOKEN: ${{ secrets.ARGOCD_GITHUB_TOKEN }}

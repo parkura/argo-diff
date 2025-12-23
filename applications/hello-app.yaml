@@ -1,0 +1,20 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: hello-app
+  namespace: argocd-diff-preview
+  annotations:
+    argocd-diff-preview/watch-pattern: "hello-app/.*"
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/parkura/argo-diff.git
+    path: hello-app
+    targetRevision: HEAD
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: default
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

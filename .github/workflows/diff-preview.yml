@@ -1,78 +1,375 @@
-name: Diff Preview
+name: ArgoCD Diff Preview
+
+concurrency:
+  group: "${{ github.event.pull_request.number }}-argocd-diff"
+  cancel-in-progress: true
+
 on:
   pull_request:
     branches:
-      - main
+      - copy-main
+    paths:
+      - 'applications/**'
+
 jobs:
-  diff-preview:
-    name: Diff Preview
-    runs-on: [argocd-diff-runner]
+  argocd-diff:
+    runs-on: ubuntu-latest
+    name: "Generate ArgoCD Diff"
     permissions:
       contents: read
       pull-requests: write
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout PR branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          path: target-branch
           fetch-depth: 0
-      - uses: actions/checkout@v4
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: pr-branch
+
+      - name: Checkout base branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: main
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.base.ref }}
           path: base-branch
-      - name: Setup kubectl
-        uses: azure/setup-kubectl@v4
-      - name: Install GitHub CLI
+
+      - name: Install tools
         run: |
-          type -p curl >/dev/null || (sudo apt update && sudo apt install curl -y)
-          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
-          sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
-          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
-          sudo apt update
-          sudo apt install gh -y
-          gh --version
-      - name: Install Argo CD CLI
+          # Install yq for YAML processing (optional, for future enhancements)
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+          yq --version
+
+      - name: Find ArgoCD Applications and ApplicationSets
+        id: find-argocd-resources
         run: |
-          curl -sSL -o argocd-linux-amd64 https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
-          sudo install -m 555 argocd-linux-amd64 /usr/local/bin/argocd
-          rm argocd-linux-amd64
-          argocd version --client || true
-      - name: Install argocd-diff-preview
+          echo "Finding ArgoCD Application and ApplicationSet manifests..."
+
+          # Find all ArgoCD Application and ApplicationSet YAML files
+          BASE_ARGOCD=$(cd base-branch && find . -type f \( -name "*.yaml" -o -name "*.yml" \) -exec grep -l "kind: Application\|kind: ApplicationSet" {} \; 2>/dev/null | sort)
+          PR_ARGOCD=$(cd pr-branch && find . -type f \( -name "*.yaml" -o -name "*.yml" \) -exec grep -l "kind: Application\|kind: ApplicationSet" {} \; 2>/dev/null | sort)
+
+          # Combine and deduplicate
+          ALL_ARGOCD=$(echo -e "$BASE_ARGOCD\n$PR_ARGOCD" | sort -u | grep -v "^$")
+
+          echo "ArgoCD resources found:"
+          echo "$ALL_ARGOCD"
+
+          # Save to file
+          echo "$ALL_ARGOCD" > argocd-resources-to-check.txt
+
+          RESOURCE_COUNT=$(echo "$ALL_ARGOCD" | grep -c "/" || echo "0")
+          echo "resource_count=$RESOURCE_COUNT" >> $GITHUB_OUTPUT
+          echo "Found $RESOURCE_COUNT ArgoCD Application/ApplicationSet files"
+
+      - name: Compare ArgoCD Application and ApplicationSet manifests
+        id: argocd-diff
+        continue-on-error: true
         run: |
-          curl -LJO https://github.com/dag-andersen/argocd-diff-preview/releases/download/v0.1.17/argocd-diff-preview-Linux-x86_64.tar.gz
-          tar -xvf argocd-diff-preview-Linux-x86_64.tar.gz
-          sudo mv argocd-diff-preview /usr/local/bin
-          argocd-diff-preview --version
-      - name: Verify cluster access
-        run: |
-          echo "Checking cluster access..."
-          kubectl get nodes || echo "Cannot list nodes (may need additional permissions)"
-          echo "Checking for Argo CD namespace..."
-          kubectl get namespace argocd-diff-preview || echo "Namespace argocd-diff-preview does not exist"
-          kubectl get namespace argocd || echo "Namespace argocd does not exist"
-      - name: Generate Diff
-        run: |
-          argocd-diff-preview \
-            --repo ${{ github.repository }} \
-            --base-branch main \
-            --target-branch refs/pull/${{ github.event.number }}/merge \
-            --argocd-namespace argocd-diff-preview \
-            --create-cluster=false \
-            --debug
-      - name: Check output
-        if: always()
-        run: |
-          echo "Checking for output files..."
-          ls -la output/ || echo "Output directory does not exist"
-          if [ -f output/diff.md ]; then
-            echo "diff.md found. Content preview:"
-            head -50 output/diff.md
+          # Create output directory
+          mkdir -p argocd-diffs
+
+          # Track statistics
+          TOTAL_RESOURCES=0
+          RESOURCES_WITH_CHANGES=0
+          RESOURCES_IN_SYNC=0
+          RESOURCES_WITH_ERRORS=0
+
+          # Read ArgoCD resources to check
+          while IFS= read -r resource_file; do
+            [ -z "$resource_file" ] && continue
+
+            TOTAL_RESOURCES=$((TOTAL_RESOURCES + 1))
+
+            # Clean up the path and create a safe name
+            RESOURCE_NAME=$(echo "$resource_file" | sed 's|^\./||' | sed 's|/|_|g' | sed 's|\.yaml$||' | sed 's|\.yml$||')
+
+            echo "========================================="
+            echo "Processing: $resource_file"
+            echo "Safe name: $RESOURCE_NAME"
+            echo "========================================="
+
+            # Check base branch version
+            if [ -f "base-branch/$resource_file" ]; then
+              echo "Extracting base branch ArgoCD resource..."
+              cp "base-branch/$resource_file" "argocd-diffs/${RESOURCE_NAME}.base.yaml"
+            else
+              echo "Resource does not exist in base branch (new resource)"
+              echo "" > "argocd-diffs/${RESOURCE_NAME}.base.yaml"
+            fi
+
+            # Check PR branch version
+            if [ -f "pr-branch/$resource_file" ]; then
+              echo "Extracting PR branch ArgoCD resource..."
+              cp "pr-branch/$resource_file" "argocd-diffs/${RESOURCE_NAME}.pr.yaml"
+            else
+              echo "Resource removed in PR branch"
+              echo "" > "argocd-diffs/${RESOURCE_NAME}.pr.yaml"
+            fi
+
+            # Generate diff
+            echo "Generating diff..."
+            diff -u "argocd-diffs/${RESOURCE_NAME}.base.yaml" "argocd-diffs/${RESOURCE_NAME}.pr.yaml" > "argocd-diffs/${RESOURCE_NAME}.diff" 2>&1 || true
+
+            # Check if there are meaningful changes
+            if [ -s "argocd-diffs/${RESOURCE_NAME}.diff" ]; then
+              # Check if it's not just empty file changes
+              if grep -qE "^[+-][^+-]" "argocd-diffs/${RESOURCE_NAME}.diff"; then
+                echo "✅ Changes detected for $resource_file"
+                RESOURCES_WITH_CHANGES=$((RESOURCES_WITH_CHANGES + 1))
+
+                # Detect resource type and name from the file
+                RESOURCE_KIND=$(grep "^kind:" "pr-branch/$resource_file" 2>/dev/null || grep "^kind:" "base-branch/$resource_file" 2>/dev/null || echo "kind: Unknown")
+                RESOURCE_METADATA_NAME=$(grep "^  name:" "pr-branch/$resource_file" 2>/dev/null | head -1 || grep "^  name:" "base-branch/$resource_file" 2>/dev/null | head -1 || echo "  name: Unknown")
+
+                # Add summary header
+                {
+                  echo "# File: $resource_file"
+                  echo "# $(echo $RESOURCE_KIND | xargs)"
+                  echo "# $(echo $RESOURCE_METADATA_NAME | xargs)"
+                  echo "# Status: Changes detected"
+                  echo ""
+                  cat "argocd-diffs/${RESOURCE_NAME}.diff"
+                } > "argocd-diffs/${RESOURCE_NAME}.diff.tmp"
+                mv "argocd-diffs/${RESOURCE_NAME}.diff.tmp" "argocd-diffs/${RESOURCE_NAME}.diff"
+              else
+                echo "✓ No meaningful changes for $resource_file"
+                RESOURCES_IN_SYNC=$((RESOURCES_IN_SYNC + 1))
+                rm -f "argocd-diffs/${RESOURCE_NAME}.diff"
+              fi
+            else
+              echo "✓ No changes for $resource_file"
+              RESOURCES_IN_SYNC=$((RESOURCES_IN_SYNC + 1))
+              rm -f "argocd-diffs/${RESOURCE_NAME}.diff"
+            fi
+
+            # Cleanup temp files
+            rm -f "argocd-diffs/${RESOURCE_NAME}.base.yaml" "argocd-diffs/${RESOURCE_NAME}.pr.yaml"
+
+          done < argocd-resources-to-check.txt
+
+          echo ""
+          echo "========================================="
+          echo "Summary:"
+          echo "  Total ArgoCD resources: $TOTAL_RESOURCES"
+          echo "  Resources with changes: $RESOURCES_WITH_CHANGES"
+          echo "  Resources in sync: $RESOURCES_IN_SYNC"
+          echo "  Resources with errors: $RESOURCES_WITH_ERRORS"
+          echo "========================================="
+
+          # Export statistics
+          echo "total_apps=$TOTAL_RESOURCES" >> $GITHUB_OUTPUT
+          echo "apps_with_changes=$RESOURCES_WITH_CHANGES" >> $GITHUB_OUTPUT
+          echo "apps_in_sync=$RESOURCES_IN_SYNC" >> $GITHUB_OUTPUT
+          echo "apps_with_errors=$RESOURCES_WITH_ERRORS" >> $GITHUB_OUTPUT
+
+          # Check if any diffs were generated
+          if [ -n "$(ls -A argocd-diffs/*.diff 2>/dev/null)" ]; then
+            echo "has_changes=true" >> $GITHUB_OUTPUT
           else
-            echo "diff.md not found!"
+            echo "has_changes=false" >> $GITHUB_OUTPUT
           fi
-      - name: Comment preview
-        if: hashFiles('output/diff.md') != ''
+
+      - name: Format diff output
+        if: steps.argocd-diff.outputs.has_changes == 'true'
         run: |
-          gh pr comment ${{ github.event.number }} --repo ${{ github.repository }} --body-file output/diff.md --edit-last || \
-          gh pr comment ${{ github.event.number }} --repo ${{ github.repository }} --body-file output/diff.md
-        env:
-          GITHUB_TOKEN: ${{ secrets.ARGOCD_GITHUB_TOKEN }}
+          cat > formatted-diff.md << 'HEADER'
+          # ⎈ ArgoCD Application/ApplicationSet Diff Preview
+
+          This PR introduces changes to ArgoCD Application or ApplicationSet resources. The diff below compares the ArgoCD resource definitions between the base branch and this PR.
+
+          HEADER
+
+          # Add summary statistics
+          cat >> formatted-diff.md << EOF
+          ## 📊 Summary
+
+          - **Total ArgoCD Resources Checked:** ${{ steps.argocd-diff.outputs.total_apps }}
+          - **Resources with Changes:** ${{ steps.argocd-diff.outputs.apps_with_changes }} 🔄
+          - **Resources Unchanged:** ${{ steps.argocd-diff.outputs.apps_in_sync }} ✅
+          - **Resources with Errors:** ${{ steps.argocd-diff.outputs.apps_with_errors }} ⚠️
+
+          **Base Branch:** \`${{ github.event.pull_request.base.ref }}\` (\`${{ github.event.pull_request.base.sha }}\`)
+          **PR Branch:** \`${{ github.event.pull_request.head.ref }}\` (\`${{ github.event.pull_request.head.sha }}\`)
+
+          ---
+
+          EOF
+
+          # Process each diff file
+          for diff_file in argocd-diffs/*.diff; do
+            if [ -f "$diff_file" ]; then
+              resource_name=$(basename "$diff_file" .diff)
+
+              # Extract metadata from the diff file header
+              resource_file=$(grep "^# File:" "$diff_file" | cut -d' ' -f3-)
+              resource_kind=$(grep "^# kind:" "$diff_file" | cut -d':' -f2- | xargs)
+              resource_meta_name=$(grep "^# name:" "$diff_file" | cut -d':' -f2- | xargs)
+
+              # Determine emoji based on kind
+              if [[ "$resource_kind" == *"ApplicationSet"* ]]; then
+                EMOJI="📦"
+              else
+                EMOJI="🎯"
+              fi
+
+              echo "## $EMOJI **$resource_kind**: \`$resource_meta_name\`" >> formatted-diff.md
+              echo "" >> formatted-diff.md
+              if [ -n "$resource_file" ]; then
+                echo "**File:** \`$resource_file\`" >> formatted-diff.md
+                echo "" >> formatted-diff.md
+              fi
+
+              echo "<details>" >> formatted-diff.md
+              echo "<summary>📋 Click to view diff</summary>" >> formatted-diff.md
+              echo "" >> formatted-diff.md
+              echo '```diff' >> formatted-diff.md
+
+              # Skip the header comments we added and limit output to prevent huge diffs
+              grep -v "^# " "$diff_file" | head -n 2000 >> formatted-diff.md
+
+              # Check if diff was truncated
+              DIFF_LINES=$(grep -v "^# " "$diff_file" | wc -l)
+              if [ "$DIFF_LINES" -gt 2000 ]; then
+                echo "" >> formatted-diff.md
+                echo "... (diff truncated, showing first 2000 lines of $DIFF_LINES total)" >> formatted-diff.md
+              fi
+
+              echo '```' >> formatted-diff.md
+              echo "</details>" >> formatted-diff.md
+              echo "" >> formatted-diff.md
+              echo "---" >> formatted-diff.md
+              echo "" >> formatted-diff.md
+            fi
+          done
+
+          # Add footer with helpful info
+          cat >> formatted-diff.md << 'FOOTER'
+
+          ## ℹ️ How to read this diff
+
+          - Lines starting with `+` indicate fields or resources that will be **added/updated** in the PR branch
+          - Lines starting with `-` indicate fields or resources from the **base branch** that will be changed or removed
+          - This diff shows changes to **ArgoCD Application and ApplicationSet** manifest files
+          - This is a **Git-based comparison** (not comparing against live cluster state or rendered Helm charts)
+
+          ### What's being compared?
+
+          - **Application**: ArgoCD Application resources that define what to deploy and where
+          - **ApplicationSet**: ArgoCD ApplicationSet resources that generate multiple Applications
+
+          ### What happens next?
+
+          After this PR is merged:
+          1. ArgoCD will detect the changes to Application/ApplicationSet resources
+          2. ArgoCD will update its internal state to reflect the new configuration
+          3. Applications will be synced according to their sync policies (manual or automatic)
+
+          FOOTER
+
+          cat >> formatted-diff.md << EOF
+          ---
+
+          _Generated by ArgoCD Resource Diff Preview • [View Workflow Run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})_
+          EOF
+
+          echo "=== Formatted Diff Preview ==="
+          cat formatted-diff.md
+
+      - name: Post or update PR comment with changes
+        if: steps.argocd-diff.outputs.has_changes == 'true'
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          script: |
+            const fs = require('fs');
+            const commentBody = fs.readFileSync('formatted-diff.md', 'utf8');
+
+            // Find existing comment
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const botComment = comments.find(comment =>
+              comment.user.type === 'Bot' &&
+              comment.body.includes('⎈ ArgoCD Application/ApplicationSet Diff Preview')
+            );
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: commentBody
+              });
+              console.log('✅ Updated existing PR comment with ArgoCD resource diff');
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: commentBody
+              });
+              console.log('✅ Created new PR comment with ArgoCD resource diff');
+            }
+
+      - name: Post or update PR comment - no changes
+        if: steps.argocd-diff.outputs.has_changes == 'false'
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          script: |
+            const totalApps = '${{ steps.argocd-diff.outputs.total_apps }}' || '0';
+            const appsInSync = '${{ steps.argocd-diff.outputs.apps_in_sync }}' || '0';
+            const baseRef = '${{ github.event.pull_request.base.ref }}';
+            const headRef = '${{ github.event.pull_request.head.ref }}';
+
+            const commentBody = `# ⎈ ArgoCD Application/ApplicationSet Diff Preview
+
+            ## ✅ No Changes Detected
+
+            This PR does not introduce any changes to ArgoCD Application or ApplicationSet resources.
+
+            ### 📊 Summary
+            - **Total ArgoCD Resources Checked:** ${totalApps}
+            - **Resources Unchanged:** ${appsInSync} ✅
+
+            **Compared:** \`${baseRef}\` ↔ \`${headRef}\`
+
+            The ArgoCD Application and ApplicationSet manifests are identical between the base branch and this PR.
+
+            ---
+
+            _Generated by ArgoCD Resource Diff Preview • [View Workflow Run](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})_
+            `;
+
+            // Find existing comment
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const botComment = comments.find(comment =>
+              comment.user.type === 'Bot' &&
+              comment.body.includes('⎈ ArgoCD Application/ApplicationSet Diff Preview')
+            );
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: commentBody
+              });
+              console.log('✅ Updated existing PR comment - no changes');
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: commentBody
+              });
+              console.log('✅ Created new PR comment - no changes');
+            }
+

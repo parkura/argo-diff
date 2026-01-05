@@ -31,6 +31,12 @@ jobs:
           ref: ${{ github.event.pull_request.base.ref }}
           path: base-branch
 
+      - name: Install yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+          yq --version
+
       - name: Find Kubernetes manifests in hello-app
         id: find-manifests
         run: |
@@ -93,6 +99,25 @@ jobs:
             if [ -f "pr-branch/$resource_file" ]; then
               echo "Extracting PR branch manifest..."
               cp "pr-branch/$resource_file" "argocd-diffs/${RESOURCE_NAME}.pr.yaml"
+
+              # Validate YAML syntax in PR branch
+              if ! yq eval '.' "pr-branch/$resource_file" > /dev/null 2>&1; then
+                echo "⚠️ YAML syntax error detected in $resource_file"
+                RESOURCES_WITH_ERRORS=$((RESOURCES_WITH_ERRORS + 1))
+
+                # Create error diff
+                {
+                  echo "# File: $resource_file"
+                  echo "# Status: YAML Syntax Error"
+                  echo ""
+                  echo "ERROR: Invalid YAML syntax detected in this file"
+                  echo ""
+                  yq eval '.' "pr-branch/$resource_file" 2>&1 || true
+                } > "argocd-diffs/${RESOURCE_NAME}.diff"
+
+                rm -f "argocd-diffs/${RESOURCE_NAME}.base.yaml" "argocd-diffs/${RESOURCE_NAME}.pr.yaml"
+                continue
+              fi
             else
               echo "Manifest removed in PR branch"
               echo "" > "argocd-diffs/${RESOURCE_NAME}.pr.yaml"
@@ -194,32 +219,40 @@ jobs:
 
               # Extract metadata from the diff file header
               resource_file=$(grep "^# File:" "$diff_file" | cut -d' ' -f3-)
+              resource_status=$(grep "^# Status:" "$diff_file" | cut -d':' -f2- | xargs)
               resource_kind=$(grep "^# kind:" "$diff_file" | cut -d':' -f2- | xargs)
               resource_meta_name=$(grep "^# name:" "$diff_file" | cut -d':' -f2- | xargs)
 
-              # If no kind found, use filename
-              if [ -z "$resource_kind" ] || [ "$resource_kind" == "Unknown" ]; then
-                resource_kind="File"
-                resource_meta_name=$(basename "$resource_file")
-              fi
-
-              # Determine emoji based on kind
-              if [[ "$resource_kind" == *"Deployment"* ]]; then
-                EMOJI="🚀"
-              elif [[ "$resource_kind" == *"Service"* ]]; then
-                EMOJI="🔌"
-              elif [[ "$resource_kind" == *"ConfigMap"* ]]; then
-                EMOJI="⚙️"
-              elif [[ "$resource_kind" == *"Secret"* ]]; then
-                EMOJI="🔐"
-              elif [[ "$resource_kind" == "File" ]]; then
-                EMOJI="📄"
+              # Check if this is an error diff
+              if [[ "$resource_status" == *"Error"* ]]; then
+                EMOJI="⚠️"
+                echo "## $EMOJI \`$resource_file\` - **YAML Syntax Error**" >> formatted-diff.md
+                echo "" >> formatted-diff.md
               else
-                EMOJI="📄"
-              fi
+                # If no kind found, use filename
+                if [ -z "$resource_kind" ] || [ "$resource_kind" == "Unknown" ]; then
+                  resource_kind="File"
+                  resource_meta_name=$(basename "$resource_file")
+                fi
 
-              echo "## $EMOJI \`$resource_file\`" >> formatted-diff.md
-              echo "" >> formatted-diff.md
+                # Determine emoji based on kind
+                if [[ "$resource_kind" == *"Deployment"* ]]; then
+                  EMOJI="🚀"
+                elif [[ "$resource_kind" == *"Service"* ]]; then
+                  EMOJI="🔌"
+                elif [[ "$resource_kind" == *"ConfigMap"* ]]; then
+                  EMOJI="⚙️"
+                elif [[ "$resource_kind" == *"Secret"* ]]; then
+                  EMOJI="🔐"
+                elif [[ "$resource_kind" == "File" ]]; then
+                  EMOJI="📄"
+                else
+                  EMOJI="📄"
+                fi
+
+                echo "## $EMOJI \`$resource_file\`" >> formatted-diff.md
+                echo "" >> formatted-diff.md
+              fi
 
               echo "<details>" >> formatted-diff.md
               echo "<summary>📋 Click to view diff</summary>" >> formatted-diff.md

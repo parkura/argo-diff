@@ -2,10 +2,7 @@ replicaCount: 1
 
 image:
   repository: nginx
-  tag: "1.25"
-  pullPolicy: IfNotPresent
-  # Invalid indentation below - this is broken YAML
-    extraField: thisWillCauseParsingError
+  tag: "1.26"
 
 service:
   type: ClusterIP

@@ -31,11 +31,17 @@ jobs:
           ref: ${{ github.event.pull_request.base.ref }}
           path: base-branch
 
-      - name: Install yq
+      - name: Install tools
         run: |
+          # Install yq for YAML validation
           sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
           sudo chmod +x /usr/local/bin/yq
           yq --version
+
+          # Install kubectl for dry-run validation
+          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+          kubectl version --client
 
       - name: Find Kubernetes manifests in hello-app
         id: find-manifests
@@ -100,23 +106,48 @@ jobs:
               echo "Extracting PR branch manifest..."
               cp "pr-branch/$resource_file" "argocd-diffs/${RESOURCE_NAME}.pr.yaml"
 
-              # Validate YAML syntax in PR branch
-              if ! yq eval '.' "pr-branch/$resource_file" > /dev/null 2>&1; then
-                echo "⚠️ YAML syntax error detected in $resource_file"
-                RESOURCES_WITH_ERRORS=$((RESOURCES_WITH_ERRORS + 1))
+              # Validate YAML syntax in PR branch (skip Helm templates)
+              if [[ "$resource_file" != *"/templates/"* ]]; then
+                # Check YAML syntax with yq
+                if ! yq eval '.' "pr-branch/$resource_file" > /dev/null 2>&1; then
+                  echo "⚠️ YAML syntax error detected in $resource_file"
+                  RESOURCES_WITH_ERRORS=$((RESOURCES_WITH_ERRORS + 1))
 
-                # Create error diff
-                {
-                  echo "# File: $resource_file"
-                  echo "# Status: YAML Syntax Error"
-                  echo ""
-                  echo "ERROR: Invalid YAML syntax detected in this file"
-                  echo ""
-                  yq eval '.' "pr-branch/$resource_file" 2>&1 || true
-                } > "argocd-diffs/${RESOURCE_NAME}.diff"
+                  # Create error diff
+                  {
+                    echo "# File: $resource_file"
+                    echo "# Status: YAML Syntax Error"
+                    echo ""
+                    echo "ERROR: Invalid YAML syntax detected in this file"
+                    echo ""
+                    yq eval '.' "pr-branch/$resource_file" 2>&1 || true
+                  } > "argocd-diffs/${RESOURCE_NAME}.diff"
 
-                rm -f "argocd-diffs/${RESOURCE_NAME}.base.yaml" "argocd-diffs/${RESOURCE_NAME}.pr.yaml"
-                continue
+                  rm -f "argocd-diffs/${RESOURCE_NAME}.base.yaml" "argocd-diffs/${RESOURCE_NAME}.pr.yaml"
+                  continue
+                fi
+
+                # Check if file contains a Kubernetes resource (has kind: field)
+                if grep -q "^kind:" "pr-branch/$resource_file"; then
+                  # Validate Kubernetes resource schema with kubectl dry-run (client-side, no cluster access)
+                  if ! kubectl apply --dry-run=client -f "pr-branch/$resource_file" > /dev/null 2>&1; then
+                    echo "⚠️ Kubernetes validation error detected in $resource_file"
+                    RESOURCES_WITH_ERRORS=$((RESOURCES_WITH_ERRORS + 1))
+
+                    # Create error diff
+                    {
+                      echo "# File: $resource_file"
+                      echo "# Status: Kubernetes Validation Error"
+                      echo ""
+                      echo "ERROR: Kubernetes resource validation failed (kubectl dry-run)"
+                      echo ""
+                      kubectl apply --dry-run=client -f "pr-branch/$resource_file" 2>&1 || true
+                    } > "argocd-diffs/${RESOURCE_NAME}.diff"
+
+                    rm -f "argocd-diffs/${RESOURCE_NAME}.base.yaml" "argocd-diffs/${RESOURCE_NAME}.pr.yaml"
+                    continue
+                  fi
+                fi
               fi
             else
               echo "Manifest removed in PR branch"
@@ -226,7 +257,11 @@ jobs:
               # Check if this is an error diff
               if [[ "$resource_status" == *"Error"* ]]; then
                 EMOJI="⚠️"
-                echo "## $EMOJI \`$resource_file\` - **YAML Syntax Error**" >> formatted-diff.md
+                if [[ "$resource_status" == *"Kubernetes Validation Error"* ]]; then
+                  echo "## $EMOJI \`$resource_file\` - **Kubernetes Validation Error** (kubectl dry-run)" >> formatted-diff.md
+                else
+                  echo "## $EMOJI \`$resource_file\` - **YAML Syntax Error**" >> formatted-diff.md
+                fi
                 echo "" >> formatted-diff.md
               else
                 # If no kind found, use filename

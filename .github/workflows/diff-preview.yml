@@ -98,9 +98,9 @@ jobs:
               echo "" > "argocd-diffs/${RESOURCE_NAME}.pr.yaml"
             fi
 
-            # Generate diff
+            # Generate diff with NJ timezone
             echo "Generating diff..."
-            diff -u "argocd-diffs/${RESOURCE_NAME}.base.yaml" "argocd-diffs/${RESOURCE_NAME}.pr.yaml" > "argocd-diffs/${RESOURCE_NAME}.diff" 2>&1 || true
+            TZ=America/New_York diff -u "argocd-diffs/${RESOURCE_NAME}.base.yaml" "argocd-diffs/${RESOURCE_NAME}.pr.yaml" > "argocd-diffs/${RESOURCE_NAME}.diff" 2>&1 || true
 
             # Check if there are meaningful changes
             if [ -s "argocd-diffs/${RESOURCE_NAME}.diff" ]; then

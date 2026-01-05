@@ -31,36 +31,29 @@ jobs:
           ref: ${{ github.event.pull_request.base.ref }}
           path: base-branch
 
-      - name: Install tools
+      - name: Find Kubernetes manifests in hello-app
+        id: find-manifests
         run: |
-          # Install yq for YAML processing (optional, for future enhancements)
-          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
-          sudo chmod +x /usr/local/bin/yq
-          yq --version
+          echo "Finding Kubernetes manifest files in hello-app directory..."
 
-      - name: Find ArgoCD Applications and ApplicationSets
-        id: find-argocd-resources
-        run: |
-          echo "Finding ArgoCD Application and ApplicationSet manifests..."
-
-          # Find all ArgoCD Application and ApplicationSet YAML files
-          BASE_ARGOCD=$(cd base-branch && find . -type f \( -name "*.yaml" -o -name "*.yml" \) -exec grep -l "kind: Application\|kind: ApplicationSet" {} \; 2>/dev/null | sort)
-          PR_ARGOCD=$(cd pr-branch && find . -type f \( -name "*.yaml" -o -name "*.yml" \) -exec grep -l "kind: Application\|kind: ApplicationSet" {} \; 2>/dev/null | sort)
+          # Find all YAML files in hello-app directory from both branches
+          BASE_MANIFESTS=$(cd base-branch && find hello-app -type f \( -name "*.yaml" -o -name "*.yml" \) 2>/dev/null | sort)
+          PR_MANIFESTS=$(cd pr-branch && find hello-app -type f \( -name "*.yaml" -o -name "*.yml" \) 2>/dev/null | sort)
 
           # Combine and deduplicate
-          ALL_ARGOCD=$(echo -e "$BASE_ARGOCD\n$PR_ARGOCD" | sort -u | grep -v "^$")
+          ALL_MANIFESTS=$(echo -e "$BASE_MANIFESTS\n$PR_MANIFESTS" | sort -u | grep -v "^$")
 
-          echo "ArgoCD resources found:"
-          echo "$ALL_ARGOCD"
+          echo "Kubernetes manifests found:"
+          echo "$ALL_MANIFESTS"
 
           # Save to file
-          echo "$ALL_ARGOCD" > argocd-resources-to-check.txt
+          echo "$ALL_MANIFESTS" > manifests-to-check.txt
 
-          RESOURCE_COUNT=$(echo "$ALL_ARGOCD" | grep -c "/" || echo "0")
-          echo "resource_count=$RESOURCE_COUNT" >> $GITHUB_OUTPUT
-          echo "Found $RESOURCE_COUNT ArgoCD Application/ApplicationSet files"
+          MANIFEST_COUNT=$(echo "$ALL_MANIFESTS" | grep -c "/" || echo "0")
+          echo "manifest_count=$MANIFEST_COUNT" >> $GITHUB_OUTPUT
+          echo "Found $MANIFEST_COUNT Kubernetes manifest files"
 
-      - name: Compare ArgoCD Application and ApplicationSet manifests
+      - name: Compare Kubernetes manifests
         id: argocd-diff
         continue-on-error: true
         run: |
@@ -73,7 +66,7 @@ jobs:
           RESOURCES_IN_SYNC=0
           RESOURCES_WITH_ERRORS=0
 
-          # Read ArgoCD resources to check
+          # Read Kubernetes manifests to check
           while IFS= read -r resource_file; do
             [ -z "$resource_file" ] && continue
 
@@ -89,19 +82,19 @@ jobs:
 
             # Check base branch version
             if [ -f "base-branch/$resource_file" ]; then
-              echo "Extracting base branch ArgoCD resource..."
+              echo "Extracting base branch manifest..."
               cp "base-branch/$resource_file" "argocd-diffs/${RESOURCE_NAME}.base.yaml"
             else
-              echo "Resource does not exist in base branch (new resource)"
+              echo "Manifest does not exist in base branch (new resource)"
               echo "" > "argocd-diffs/${RESOURCE_NAME}.base.yaml"
             fi
 
             # Check PR branch version
             if [ -f "pr-branch/$resource_file" ]; then
-              echo "Extracting PR branch ArgoCD resource..."
+              echo "Extracting PR branch manifest..."
               cp "pr-branch/$resource_file" "argocd-diffs/${RESOURCE_NAME}.pr.yaml"
             else
-              echo "Resource removed in PR branch"
+              echo "Manifest removed in PR branch"
               echo "" > "argocd-diffs/${RESOURCE_NAME}.pr.yaml"
             fi
 
@@ -144,15 +137,15 @@ jobs:
             # Cleanup temp files
             rm -f "argocd-diffs/${RESOURCE_NAME}.base.yaml" "argocd-diffs/${RESOURCE_NAME}.pr.yaml"
 
-          done < argocd-resources-to-check.txt
+          done < manifests-to-check.txt
 
           echo ""
           echo "========================================="
           echo "Summary:"
-          echo "  Total ArgoCD resources: $TOTAL_RESOURCES"
-          echo "  Resources with changes: $RESOURCES_WITH_CHANGES"
-          echo "  Resources in sync: $RESOURCES_IN_SYNC"
-          echo "  Resources with errors: $RESOURCES_WITH_ERRORS"
+          echo "  Total Kubernetes manifests: $TOTAL_RESOURCES"
+          echo "  Manifests with changes: $RESOURCES_WITH_CHANGES"
+          echo "  Manifests in sync: $RESOURCES_IN_SYNC"
+          echo "  Manifests with errors: $RESOURCES_WITH_ERRORS"
           echo "========================================="
 
           # Export statistics
@@ -172,9 +165,9 @@ jobs:
         if: steps.argocd-diff.outputs.has_changes == 'true'
         run: |
           cat > formatted-diff.md << 'HEADER'
-          # ⎈ ArgoCD Application/ApplicationSet Diff Preview
+          # ⎈ Kubernetes Manifest Diff Preview
 
-          This PR introduces changes to ArgoCD Application or ApplicationSet resources. The diff below compares the ArgoCD resource definitions between the base branch and this PR.
+          This PR introduces changes to Kubernetes manifest files in the hello-app directory. The diff below compares the manifest files between the base branch and this PR.
 
           HEADER
 
@@ -182,10 +175,10 @@ jobs:
           cat >> formatted-diff.md << EOF
           ## 📊 Summary
 
-          - **Total ArgoCD Resources Checked:** ${{ steps.argocd-diff.outputs.total_apps }}
-          - **Resources with Changes:** ${{ steps.argocd-diff.outputs.apps_with_changes }} 🔄
-          - **Resources Unchanged:** ${{ steps.argocd-diff.outputs.apps_in_sync }} ✅
-          - **Resources with Errors:** ${{ steps.argocd-diff.outputs.apps_with_errors }} ⚠️
+          - **Total Kubernetes Manifests Checked:** ${{ steps.argocd-diff.outputs.total_apps }}
+          - **Manifests with Changes:** ${{ steps.argocd-diff.outputs.apps_with_changes }} 🔄
+          - **Manifests Unchanged:** ${{ steps.argocd-diff.outputs.apps_in_sync }} ✅
+          - **Manifests with Errors:** ${{ steps.argocd-diff.outputs.apps_with_errors }} ⚠️
 
           **Base Branch:** \`${{ github.event.pull_request.base.ref }}\` (\`${{ github.event.pull_request.base.sha }}\`)
           **PR Branch:** \`${{ github.event.pull_request.head.ref }}\` (\`${{ github.event.pull_request.head.sha }}\`)
@@ -205,10 +198,16 @@ jobs:
               resource_meta_name=$(grep "^# name:" "$diff_file" | cut -d':' -f2- | xargs)
 
               # Determine emoji based on kind
-              if [[ "$resource_kind" == *"ApplicationSet"* ]]; then
-                EMOJI="📦"
+              if [[ "$resource_kind" == *"Deployment"* ]]; then
+                EMOJI="🚀"
+              elif [[ "$resource_kind" == *"Service"* ]]; then
+                EMOJI="🔌"
+              elif [[ "$resource_kind" == *"ConfigMap"* ]]; then
+                EMOJI="⚙️"
+              elif [[ "$resource_kind" == *"Secret"* ]]; then
+                EMOJI="🔐"
               else
-                EMOJI="🎯"
+                EMOJI="📄"
               fi
 
               echo "## $EMOJI **$resource_kind**: \`$resource_meta_name\`" >> formatted-diff.md
@@ -246,29 +245,28 @@ jobs:
 
           ## ℹ️ How to read this diff
 
-          - Lines starting with `+` indicate fields or resources that will be **added/updated** in the PR branch
-          - Lines starting with `-` indicate fields or resources from the **base branch** that will be changed or removed
-          - This diff shows changes to **ArgoCD Application and ApplicationSet** manifest files
-          - This is a **Git-based comparison** (not comparing against live cluster state or rendered Helm charts)
+          - Lines starting with `+` indicate fields that will be **added/updated** in the PR branch
+          - Lines starting with `-` indicate fields from the **base branch** that will be changed or removed
+          - This diff shows changes to **Kubernetes manifest files** in the hello-app directory
+          - This is a **Git-based comparison** (not comparing against live cluster state)
 
           ### What's being compared?
 
-          - **Application**: ArgoCD Application resources that define what to deploy and where
-          - **ApplicationSet**: ArgoCD ApplicationSet resources that generate multiple Applications
+          - **Kubernetes manifests**: YAML files defining Deployments, Services, ConfigMaps, and other Kubernetes resources in hello-app/
 
           ### What happens next?
 
           After this PR is merged:
-          1. ArgoCD will detect the changes to Application/ApplicationSet resources
-          2. ArgoCD will update its internal state to reflect the new configuration
-          3. Applications will be synced according to their sync policies (manual or automatic)
+          1. ArgoCD will detect the changes to the Kubernetes manifests
+          2. ArgoCD will sync the changes to the cluster (if auto-sync is enabled)
+          3. The updated resources will be deployed to your Kubernetes cluster
 
           FOOTER
 
           cat >> formatted-diff.md << EOF
           ---
 
-          _Generated by ArgoCD Resource Diff Preview • [View Workflow Run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})_
+          _Generated by Kubernetes Manifest Diff Preview • [View Workflow Run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})_
           EOF
 
           echo "=== Formatted Diff Preview ==="
@@ -291,7 +289,7 @@ jobs:
 
             const botComment = comments.find(comment =>
               comment.user.type === 'Bot' &&
-              comment.body.includes('⎈ ArgoCD Application/ApplicationSet Diff Preview')
+              comment.body.includes('⎈ Kubernetes Manifest Diff Preview')
             );
 
             if (botComment) {
@@ -301,7 +299,7 @@ jobs:
                 comment_id: botComment.id,
                 body: commentBody
               });
-              console.log('✅ Updated existing PR comment with ArgoCD resource diff');
+              console.log('✅ Updated existing PR comment with Kubernetes manifest diff');
             } else {
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
@@ -309,7 +307,7 @@ jobs:
                 issue_number: context.issue.number,
                 body: commentBody
               });
-              console.log('✅ Created new PR comment with ArgoCD resource diff');
+              console.log('✅ Created new PR comment with Kubernetes manifest diff');
             }
 
       - name: Post or update PR comment - no changes
@@ -350,7 +348,7 @@ jobs:
 
             const botComment = comments.find(comment =>
               comment.user.type === 'Bot' &&
-              comment.body.includes('⎈ ArgoCD Application/ApplicationSet Diff Preview')
+              comment.body.includes('⎈ Kubernetes Manifest Diff Preview')
             );
 
             if (botComment) {

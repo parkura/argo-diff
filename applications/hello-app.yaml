@@ -2,7 +2,7 @@ apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: hello-app
-  namespace: argocd-diff-preview
+  namespace: argocd
   annotations:
     argocd-diff-preview/watch-pattern: "hello-app/.*"
 spec:
